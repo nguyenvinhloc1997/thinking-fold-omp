@@ -1,0 +1,33 @@
+{
+  "name": "thinking-fold-omp",
+  "version": "0.1.0",
+  "description": "Fold streaming assistant thinking into a live tail preview for Oh My Pi (OMP).",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/nguyenvinhloc1997/thinking-fold-omp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nguyenvinhloc1997/thinking-fold-omp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nguyenvinhloc1997/thinking-fold-omp/issues"
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "extension",
+    "thinking",
+    "reasoning",
+    "tui"
+  ],
+  "omp": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": "*",
+    "@oh-my-pi/pi-tui": "*"
+  }
+}
