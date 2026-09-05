@@ -100,7 +100,7 @@ function rebuild(
 	}
 
 	const thinkingText = record.latestThinking.get(message.timestamp) ?? latestThinkingText(message);
-	if (!record.enabled || record.expanded || !thinkingText) {
+	if (!record.enabled || !thinkingText) {
 		restoreNativeHide(component, state);
 		state.renderedMessage = message;
 		record.originalUpdate.call(component, message, opts);
@@ -143,8 +143,8 @@ function rebuild(
 	replaceMarkedThinkingChildren({
 		children,
 		sections: marked.sections,
-		previewLines: record.previewLines,
-		mode: displayMode(timing),
+		previewLines: record.expanded ? Number.MAX_SAFE_INTEGER : record.previewLines,
+		mode: record.expanded ? "preview" : displayMode(timing),
 		labelFor: (canExpand) =>
 			completed
 				? createCompletedThinkingLabel(elapsed, canExpand)

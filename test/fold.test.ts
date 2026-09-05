@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	FoldedThinkingSection,
+	applyThinkingText,
 	createMarkedThinkingMessage,
 	createThinkingMarker,
 	findContentChildren,
@@ -97,6 +98,25 @@ describe("stripThinkingBlocks", () => {
 		expect(stripped.content).toEqual([
 			{ type: "thinking", thinking: "" },
 			{ type: "text", text: "answer" },
+		]);
+	});
+});
+
+describe("applyThinkingText", () => {
+	test("puts the latest thinking on the first thinking slot", () => {
+		const next = applyThinkingText(
+			{
+				timestamp: 1,
+				content: [
+					{ type: "thinking", thinking: "old" },
+					{ type: "text", text: "hi" },
+				],
+			},
+			"newest tail",
+		);
+		expect(next.content).toEqual([
+			{ type: "thinking", thinking: "newest tail" },
+			{ type: "text", text: "hi" },
 		]);
 	});
 });

@@ -65,6 +65,8 @@ If the public component API is missing, the extension disables itself and leaves
 bun test
 ```
 
+`test/tui-render.test.ts` constructs OMP's `AssistantMessageComponent` (pinned to 18.1.2) and asserts `render(width)`. It does not start a live `omp` session.
+
 ## License
 
 MIT

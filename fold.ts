@@ -185,6 +185,18 @@ export function stripThinkingBlocks<T extends AssistantLikeMessage>(message: T):
 	};
 }
 
+export function applyThinkingText<T extends AssistantLikeMessage>(message: T, thinkingText: string): T {
+	const content = message.content.map((block) =>
+		block.type === "thinking" ? { ...block, thinking: "" } : { ...block },
+	);
+	const firstThinking = content.findIndex((block) => block.type === "thinking");
+	if (firstThinking >= 0) {
+		const first = content[firstThinking];
+		if (first?.type === "thinking") content[firstThinking] = { ...first, thinking: thinkingText };
+	}
+	return { ...message, content };
+}
+
 export function createMarkedThinkingMessage(
 	message: AssistantLikeMessage,
 	options?: { thinkingText?: string },
