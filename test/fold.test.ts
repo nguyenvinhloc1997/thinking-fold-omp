@@ -5,9 +5,13 @@ import {
 	createMarkedThinkingMessage,
 	createThinkingMarker,
 	findContentChildren,
+	contentShapeKey,
+	findFoldedThinking,
 	foldRenderedLines,
+	hasDisplayableThinkingText,
 	latestThinkingText,
 	previewMatchesMarker,
+	previewThinkingSource,
 	replaceMarkedThinkingChildren,
 	stripThinkingBlocks,
 } from "../fold.ts";
@@ -68,6 +72,137 @@ describe("FoldedThinkingSection", () => {
 			mode: "collapse",
 		});
 		expect(section.render(80)).toEqual(["Thought for 12.3s (alt+t to expand)"]);
+	});
+});
+
+describe("hasDisplayableThinkingText", () => {
+	test("rejects empty and whitespace without copying the string", () => {
+		expect(hasDisplayableThinkingText("")).toBe(false);
+		expect(hasDisplayableThinkingText(" \n\t")).toBe(false);
+		expect(hasDisplayableThinkingText("ok")).toBe(true);
+	});
+});
+
+describe("contentShapeKey", () => {
+	test("ignores thinking body so a growing trace keeps the same shape", () => {
+		expect(contentShapeKey({ timestamp: 1, content: [{ type: "thinking", thinking: "a" }] })).toBe("K");
+		expect(contentShapeKey({ timestamp: 1, content: [{ type: "thinking", thinking: "ab" }] })).toBe("K");
+		expect(
+			contentShapeKey({
+				timestamp: 1,
+				content: [
+					{ type: "thinking", thinking: "a" },
+					{ type: "text", text: "hi" },
+				],
+			}),
+		).toBe("KT");
+	});
+});
+
+describe("findFoldedThinking", () => {
+	test("returns the existing fold child", () => {
+		const fold = new FoldedThinkingSection({
+			content: { render: () => [] },
+			labelFor: () => "x",
+			previewLines: 1,
+			mode: "collapse",
+			marker: "@@fold:1:0@@",
+		});
+		expect(findFoldedThinking([{}, fold])).toBe(fold);
+		expect(findFoldedThinking([])).toBeUndefined();
+	});
+});
+
+describe("previewThinkingSource", () => {
+	test("keeps only the last N source lines so Markdown never sees the whole trace", () => {
+		expect(previewThinkingSource("a\nb\nc\nd\ne", 2)).toBe("d\ne");
+	});
+
+	test("caps a single huge line so wrap cannot explode the TUI", () => {
+		const huge = "x".repeat(20_000);
+		expect(previewThinkingSource(huge, 5).length).toBeLessThanOrEqual(4000);
+	});
+});
+
+describe("FoldedThinkingSection markdown budget", () => {
+	test("preview mode only gives Markdown the last N source lines", () => {
+		let set = "";
+		const content = {
+			setText: (text: string) => {
+				set = text;
+			},
+			render: () => set.split("\n"),
+		};
+		const section = new FoldedThinkingSection({
+			content,
+			labelFor: (canExpand) => (canExpand ? "Thinking 7s (alt+t to expand)" : "Thinking 7s"),
+			previewLines: 2,
+			mode: "preview",
+		});
+		section.setContentText("a\nb\nc\nd\ne");
+		expect(set).toBe("d\ne");
+		expect(section.render(80)).toEqual(["Thinking 7s (alt+t to expand)", "d", "e"]);
+	});
+
+	test("collapse mode does not feed Markdown the full thinking", () => {
+		let set = "stale";
+		const content = {
+			setText: (text: string) => {
+				set = text;
+			},
+			render: () => ["should not paint"],
+		};
+		const section = new FoldedThinkingSection({
+			content,
+			labelFor: () => "Thought for 12.3s (alt+t to expand)",
+			previewLines: 2,
+			mode: "collapse",
+		});
+		section.setContentText("a\n".repeat(5000));
+		expect(set).toBe("");
+		expect(section.render(80)).toEqual(["Thought for 12.3s (alt+t to expand)"]);
+	});
+
+	test("skips Markdown setText when the displayed tail did not change", () => {
+		let sets = 0;
+		const content = {
+			setText: () => {
+				sets += 1;
+			},
+			render: () => ["tail"],
+		};
+		const section = new FoldedThinkingSection({
+			content,
+			labelFor: () => "Thinking 1s",
+			previewLines: 1,
+			mode: "preview",
+		});
+		section.setContentText("keep\ntail");
+		section.setContentText("keep\ntail");
+		section.update({ labelFor: () => "Thinking 2s" });
+		expect(sets).toBe(1);
+	});
+
+	test("defers loading the full trace until expand actually paints", () => {
+		let set = "";
+		const content = {
+			setText: (text: string) => {
+				set = text;
+			},
+			render: () => set.split("\n"),
+		};
+		const section = new FoldedThinkingSection({
+			content,
+			labelFor: () => "Thought for 1.0s",
+			previewLines: 1,
+			mode: "preview",
+		});
+		section.setContentText("hidden\nvisible");
+		expect(set).toBe("visible");
+		section.update({ previewLines: Number.MAX_SAFE_INTEGER, mode: "preview" });
+		expect(set).toBe("visible");
+		section.render(80);
+		expect(set).toBe("hidden\nvisible");
 	});
 });
 
@@ -162,7 +297,7 @@ describe("replaceMarkedThinkingChildren", () => {
 			mode: "collapse",
 		});
 		expect(replaced).toBe(true);
-		expect(thinking.text).toBe("full\ntrace\ntail");
+		expect(thinking.text).toBe("");
 		expect(children[1]).toBeInstanceOf(FoldedThinkingSection);
 		expect((children[1] as FoldedThinkingSection).render(80)).toEqual([
 			"Thought for 1.0s (alt+t to expand)",
@@ -197,7 +332,7 @@ describe("replaceMarkedThinkingChildren", () => {
 		});
 		expect(replaced).toBe(true);
 		expect(children[0]).toBe(fold);
-		expect(thinking.text).toBe("new thinking");
+		expect(thinking.text).toBe("");
 		expect(fold.render(80)).toEqual(["Thinking 3s (alt+t to expand)"]);
 	});
 

@@ -2,8 +2,12 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent";
 import { createCompletedThinkingLabel, createStreamingThinkingLabel } from "./labels.ts";
 import {
+	contentShapeKey,
 	createMarkedThinkingMessage,
+	nonThinkingFingerprint,
 	findContentChildren,
+	findFoldedThinking,
+	hasDisplayableThinkingText,
 	latestThinkingText,
 	replaceMarkedThinkingChildren,
 	stripThinkingBlocks,
@@ -15,6 +19,8 @@ interface ComponentState {
 	fullMessage?: AssistantMessage;
 	renderedMessage?: AssistantMessage;
 	nativeHide?: boolean;
+	foldShape?: string;
+	nonThinking?: string;
 }
 
 interface AssistantInternals {
@@ -56,7 +62,7 @@ interface PatchRecord {
 }
 
 function hasThinking(message: AssistantMessage): boolean {
-	return message.content.some((block) => block.type === "thinking" && block.thinking.trim());
+	return message.content.some((block) => block.type === "thinking" && hasDisplayableThinkingText(block.thinking));
 }
 
 function isMarkedMessage(message: AssistantMessage): boolean {
@@ -103,18 +109,37 @@ function rebuild(
 	if (!record.enabled || !thinkingText) {
 		restoreNativeHide(component, state);
 		state.renderedMessage = message;
+		state.foldShape = undefined;
 		record.originalUpdate.call(component, message, opts);
 		return;
 	}
 
 	const primary = primaryFor(record, message.timestamp, component);
 	if (primary !== component) {
-		restoreNativeHide(component, state);
-		const stripped = stripThinkingBlocks(message);
-		state.renderedMessage = stripped as AssistantMessage;
-		record.originalUpdate.call(component, stripped as AssistantMessage, opts);
+		const shape = contentShapeKey(message);
+		const fingerprint = nonThinkingFingerprint(message);
+		if (state.foldShape !== shape || state.nonThinking !== fingerprint) {
+			restoreNativeHide(component, state);
+			const stripped = stripThinkingBlocks(message);
+			state.renderedMessage = stripped as AssistantMessage;
+			state.foldShape = shape;
+			state.nonThinking = fingerprint;
+			record.originalUpdate.call(component, stripped as AssistantMessage, opts);
+		}
 		const primaryState = record.states.get(primary);
 		if (primaryState) rebuild(primary, primaryState, record);
+		return;
+	}
+
+	if (!record.timings.has(message.timestamp)) {
+		record.timings.set(message.timestamp, beginTiming(Date.now()));
+	}
+
+	const children = findContentChildren(component);
+	const existing = children ? findFoldedThinking(children) : undefined;
+	const shape = contentShapeKey(message);
+	if (existing && state.foldShape === shape) {
+		updateFold(existing, record, message.timestamp, thinkingText);
 		return;
 	}
 
@@ -129,26 +154,41 @@ function rebuild(
 	// Stay off while the fold is live so OMP's shape key does not flip every token.
 	internals.hideThinkingBlock = false;
 	state.renderedMessage = marked.message as AssistantMessage;
+	state.foldShape = shape;
 	record.originalUpdate.call(component, marked.message as AssistantMessage, opts);
 
-	const children = findContentChildren(component);
-	if (!children) return;
-
-	if (!record.timings.has(message.timestamp)) {
-		record.timings.set(message.timestamp, beginTiming(Date.now()));
-	}
-	const timing = record.timings.get(message.timestamp);
-	const elapsed = elapsedThinkingMs(timing, Date.now());
-	const completed = timing?.completedAt !== undefined;
+	const nextChildren = findContentChildren(component);
+	if (!nextChildren) return;
 	replaceMarkedThinkingChildren({
-		children,
+		children: nextChildren,
 		sections: marked.sections,
 		previewLines: record.expanded ? Number.MAX_SAFE_INTEGER : record.previewLines,
-		mode: record.expanded ? "preview" : displayMode(timing),
-		labelFor: (canExpand) =>
-			completed
-				? createCompletedThinkingLabel(elapsed, canExpand)
-				: createStreamingThinkingLabel(elapsed, canExpand),
+		mode: record.expanded ? "preview" : displayMode(record.timings.get(message.timestamp)),
+		labelFor: foldLabel(record, message.timestamp),
+	});
+}
+
+function foldLabel(record: PatchRecord, timestamp: number): (canExpand: boolean) => string {
+	const timing = record.timings.get(timestamp);
+	const elapsed = elapsedThinkingMs(timing, Date.now());
+	const completed = timing?.completedAt !== undefined;
+	return (canExpand) =>
+		completed
+			? createCompletedThinkingLabel(elapsed, canExpand)
+			: createStreamingThinkingLabel(elapsed, canExpand);
+}
+
+function updateFold(
+	fold: NonNullable<ReturnType<typeof findFoldedThinking>>,
+	record: PatchRecord,
+	timestamp: number,
+	thinkingText: string,
+): void {
+	fold.update({
+		text: thinkingText,
+		previewLines: record.expanded ? Number.MAX_SAFE_INTEGER : record.previewLines,
+		mode: record.expanded ? "preview" : displayMode(record.timings.get(timestamp)),
+		labelFor: foldLabel(record, timestamp),
 	});
 }
 
@@ -272,7 +312,6 @@ export function installThinkingFoldPatch(previewLines: number): ThinkingFoldPatc
 		},
 		setMessageTiming(timestamp, timing) {
 			record.timings.set(timestamp, { ...timing });
-			record.rerenderTimestamp(timestamp);
 		},
 		beginMessage(message, startedAt = Date.now()) {
 			if (!record.timings.has(message.timestamp)) {
@@ -291,11 +330,13 @@ export function installThinkingFoldPatch(previewLines: number): ThinkingFoldPatc
 			record.rerenderTimestamp(message.timestamp);
 		},
 		tick(_now = Date.now()) {
-			forEachLive(record, (component, state) => {
-				const timestamp = state.fullMessage?.timestamp;
-				if (timestamp === undefined || record.timings.get(timestamp)?.completedAt !== undefined) return;
-				rebuild(component, state, record);
-			});
+			for (const [timestamp, timing] of record.timings) {
+				if (timing.completedAt !== undefined) continue;
+				const primary = record.primaries.get(timestamp)?.deref();
+				if (!primary) continue;
+				const state = record.states.get(primary);
+				if (state) rebuild(primary, state, record);
+			}
 		},
 		dispose() {
 			if (disposed) return;

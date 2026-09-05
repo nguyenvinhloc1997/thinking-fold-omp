@@ -9,6 +9,7 @@ import {
 	type ThinkingFoldConfig,
 } from "./config.ts";
 import { endsThinkingPhase, resumesThinkingPhase } from "./events.ts";
+import { hasDisplayableThinkingText } from "./fold.ts";
 import { installThinkingFoldPatch, type ThinkingFoldPatchHandle } from "./renderer.ts";
 
 const ITEM_TIMER_MS = 1000;
@@ -18,7 +19,7 @@ function isAssistantMessage(message: { role?: string }): message is AssistantMes
 }
 
 function hasThinking(message: AssistantMessage): boolean {
-	return message.content.some((block) => block.type === "thinking" && block.thinking.trim());
+	return message.content.some((block) => block.type === "thinking" && hasDisplayableThinkingText(block.thinking));
 }
 
 function restoreTimings(ctx: ExtensionContext, patch: ThinkingFoldPatchHandle): void {

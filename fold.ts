@@ -24,11 +24,80 @@ export interface FoldedThinkingSectionOptions {
 	marker?: string;
 }
 
+export const PREVIEW_THINKING_MAX_CHARS = 4000;
+
+export function previewThinkingSource(text: string, previewLines: number): string {
+	if (!text) return "";
+	const keep = Math.max(1, previewLines);
+	let start = text.length;
+	let lines = 0;
+	while (start > 0 && lines < keep) {
+		const prev = text.lastIndexOf("\n", start - 1);
+		start = prev === -1 ? 0 : prev;
+		lines += 1;
+		if (prev === -1) break;
+	}
+	if (start > 0 && text[start] === "\n") start += 1;
+	let slice = text.slice(start);
+	if (slice.length > PREVIEW_THINKING_MAX_CHARS) slice = slice.slice(-PREVIEW_THINKING_MAX_CHARS);
+	return slice;
+}
+
+function displayThinkingSource(text: string, mode: FoldMode, previewLines: number): string {
+	if (mode === "collapse") return "";
+	if (previewLines >= Number.MAX_SAFE_INTEGER) return text;
+	return previewThinkingSource(text, previewLines);
+}
+
+export function hasDisplayableThinkingText(text: string | undefined): boolean {
+	if (!text) return false;
+	for (let index = 0; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if (code > 32) return true;
+		if (code !== 9 && code !== 10 && code !== 13 && code !== 32) return true;
+	}
+	return false;
+}
+
+export function contentShapeKey(message: AssistantLikeMessage): string {
+	let key = "";
+	for (const block of message.content) {
+		if (block.type === "thinking") key += "K";
+		else if (block.type === "text") key += hasDisplayableThinkingText(block.text) ? "T" : "t";
+		else key += block.type[0] ?? "?";
+	}
+	return key;
+}
+
+export function nonThinkingFingerprint(message: AssistantLikeMessage): string {
+	let fingerprint = "";
+	for (const block of message.content) {
+		if (block.type === "thinking") continue;
+		if (block.type === "text") fingerprint += `${block.text?.length ?? 0}:`;
+		else fingerprint += `${block.type[0] ?? "?"}:`;
+	}
+	return fingerprint;
+}
+
+export function findFoldedThinking(children: unknown[]): FoldedThinkingSection | undefined {
+	for (const child of children) {
+		if (child instanceof FoldedThinkingSection) return child;
+	}
+	return undefined;
+}
+
+export function hasVisibleNonThinking(message: AssistantLikeMessage): boolean {
+	return message.content.some((block) => block.type !== "thinking" && (block.type !== "text" || hasDisplayableThinkingText(block.text)));
+}
+
 export class FoldedThinkingSection implements Renderable {
 	#content: Renderable;
 	#labelFor: (canExpand: boolean) => string;
 	#previewLines: number;
 	#mode: FoldMode;
+	#fullText = "";
+	#displayed?: string;
+	#lazyFull = false;
 	readonly marker?: string;
 
 	constructor(options: FoldedThinkingSectionOptions) {
@@ -39,24 +108,67 @@ export class FoldedThinkingSection implements Renderable {
 		this.marker = options.marker;
 	}
 
-	update(options: Partial<Omit<FoldedThinkingSectionOptions, "marker">>): void {
-		if (options.content) this.#content = options.content;
+	update(
+		options: Partial<Omit<FoldedThinkingSectionOptions, "marker">> & { text?: string },
+	): void {
+		let contentChanged = false;
+		if (options.content) {
+			this.#content = options.content;
+			contentChanged = true;
+		}
 		if (options.labelFor) this.#labelFor = options.labelFor;
-		if (options.previewLines !== undefined) this.#previewLines = options.previewLines;
-		if (options.mode) this.#mode = options.mode;
+		if (options.previewLines !== undefined && options.previewLines !== this.#previewLines) {
+			this.#previewLines = options.previewLines;
+			contentChanged = true;
+		}
+		if (options.mode && options.mode !== this.#mode) {
+			this.#mode = options.mode;
+			contentChanged = true;
+		}
+		if (options.text !== undefined && options.text !== this.#fullText) {
+			this.#fullText = options.text;
+			contentChanged = true;
+		}
+		if (contentChanged) this.#syncContent();
 	}
 
 	setContentText(text: string): void {
-		const content = this.#content as DebugPreview;
-		content.setText?.(text);
+		this.update({ text });
+	}
+
+	#syncContent(): void {
+		if (this.#previewLines >= Number.MAX_SAFE_INTEGER && this.#mode === "preview") {
+			this.#lazyFull = true;
+			return;
+		}
+		this.#lazyFull = false;
+		const display = displayThinkingSource(this.#fullText, this.#mode, this.#previewLines);
+		if (display === this.#displayed) return;
+		this.#displayed = display;
+		(this.#content as DebugPreview).setText?.(display);
+	}
+
+	#materializeFull(): void {
+		if (!this.#lazyFull) return;
+		this.#lazyFull = false;
+		if (this.#displayed === this.#fullText) return;
+		this.#displayed = this.#fullText;
+		(this.#content as DebugPreview).setText?.(this.#fullText);
+	}
+
+	#canExpand(renderedLength = 0): boolean {
+		if (this.#fullText) {
+			return displayThinkingSource(this.#fullText, this.#mode, this.#previewLines) !== this.#fullText;
+		}
+		return this.#mode === "collapse" || renderedLength > this.#previewLines;
 	}
 
 	render(width: number): string[] {
-		const full = this.#content.render(width);
-		const canExpand = this.#mode === "collapse" || full.length > this.#previewLines;
-		const label = this.#labelFor(canExpand);
-		const body = this.#mode === "collapse" ? [] : foldRenderedLines(full, this.#previewLines);
-		return [label, ...body];
+		this.#materializeFull();
+		if (this.#mode === "collapse") return [this.#labelFor(this.#canExpand())];
+		const rendered = this.#content.render(width);
+		const body = foldRenderedLines(rendered, this.#previewLines);
+		return [this.#labelFor(this.#canExpand(rendered.length)), ...body];
 	}
 }
 
@@ -97,8 +209,8 @@ export function replaceMarkedThinkingChildren(options: {
 		if (child instanceof FoldedThinkingSection && child.marker && pending.has(child.marker)) {
 			const section = pending.get(child.marker);
 			if (!section) continue;
-			child.setContentText(section.text);
 			child.update({
+				text: section.text,
 				labelFor: options.labelFor,
 				previewLines: options.previewLines,
 				mode: options.mode,
@@ -112,14 +224,15 @@ export function replaceMarkedThinkingChildren(options: {
 		const section = [...pending.values()].find((item) => previewMatchesMarker(preview, item.marker));
 		if (!section) continue;
 		const content = child as DebugPreview;
-		content.setText?.(section.text);
-		options.children[index] = new FoldedThinkingSection({
+		const fold = new FoldedThinkingSection({
 			content,
 			labelFor: options.labelFor,
 			previewLines: options.previewLines,
 			mode: options.mode,
 			marker: section.marker,
 		});
+		fold.setContentText(section.text);
+		options.children[index] = fold;
 		pending.delete(section.marker);
 	}
 	return pending.size === 0;
@@ -134,6 +247,7 @@ function readPreview(child: object): unknown {
 export interface ThinkingBlock {
 	type: string;
 	thinking?: string;
+	text?: string;
 }
 
 export interface AssistantLikeMessage {
@@ -160,8 +274,8 @@ function thinkingRuns(message: AssistantLikeMessage): { start: number; end: numb
 		while (index < message.content.length) {
 			const thinking = message.content[index];
 			if (!thinking || thinking.type !== "thinking") break;
-			const text = thinking.thinking?.trim() ?? "";
-			if (text) fragments.push(text);
+			const text = thinking.thinking ?? "";
+			if (hasDisplayableThinkingText(text)) fragments.push(text);
 			index += 1;
 		}
 		runs.push({ start, end: index, text: fragments.join("\n\n") });
