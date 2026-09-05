@@ -9,3 +9,7 @@ const ENDS_THINKING = new Set([
 export function endsThinkingPhase(type: string): boolean {
 	return ENDS_THINKING.has(type);
 }
+
+export function resumesThinkingPhase(type: string): boolean {
+	return type === "thinking_start";
+}

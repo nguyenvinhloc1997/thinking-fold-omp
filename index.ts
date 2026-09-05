@@ -8,7 +8,7 @@ import {
 	saveConfig,
 	type ThinkingFoldConfig,
 } from "./config.ts";
-import { endsThinkingPhase } from "./events.ts";
+import { endsThinkingPhase, resumesThinkingPhase } from "./events.ts";
 import { installThinkingFoldPatch, type ThinkingFoldPatchHandle } from "./renderer.ts";
 
 const ITEM_TIMER_MS = 1000;
@@ -144,11 +144,23 @@ export default async function thinkingFold(pi: ExtensionAPI): Promise<void> {
 	pi.on("message_update", (event, ctx) => {
 		if (!isAssistantMessage(event.message) || ctx.mode !== "tui" || !patch) return;
 		currentAssistant = event.message;
+		const eventType = event.assistantMessageEvent.type;
 		if (hasThinking(event.message)) {
 			sawThinking = true;
+		}
+		if (resumesThinkingPhase(eventType)) {
+			sawThinking = true;
+			if (thinkingCompleted) {
+				thinkingCompleted = false;
+				patch.resumeMessage(event.message);
+			}
+			startTimer(ctx);
+			return;
+		}
+		if (hasThinking(event.message)) {
 			startTimer(ctx);
 		}
-		if (sawThinking && !thinkingCompleted && endsThinkingPhase(event.assistantMessageEvent.type)) {
+		if (sawThinking && !thinkingCompleted && endsThinkingPhase(eventType)) {
 			patch.completeMessage(event.message, Date.now());
 			thinkingCompleted = true;
 			stopTimer(ctx);

@@ -4,18 +4,17 @@ import { createCompletedThinkingLabel, createStreamingThinkingLabel } from "./la
 import {
 	createMarkedThinkingMessage,
 	findContentChildren,
+	latestThinkingText,
 	replaceMarkedThinkingChildren,
+	stripThinkingBlocks,
 	type FoldMode,
 } from "./fold.ts";
-
-export interface ThinkingTiming {
-	startedAt: number;
-	completedAt?: number;
-}
+import { beginTiming, completeTiming, elapsedThinkingMs, resumeTiming, type ThinkingTiming } from "./timing.ts";
 
 interface ComponentState {
 	fullMessage?: AssistantMessage;
 	renderedMessage?: AssistantMessage;
+	nativeHide?: boolean;
 }
 
 interface AssistantInternals {
@@ -23,6 +22,7 @@ interface AssistantInternals {
 }
 
 const PATCH_SYMBOL = Symbol.for("thinking-fold-omp/assistant-message-patch");
+const MARKER_PREFIX = "@@fold:";
 
 export interface ThinkingFoldPatchHandle {
 	readonly expanded: boolean;
@@ -34,6 +34,7 @@ export interface ThinkingFoldPatchHandle {
 	setMessageTiming(timestamp: number, timing: ThinkingTiming): void;
 	beginMessage(message: AssistantMessage, startedAt?: number): void;
 	completeMessage(message: AssistantMessage, completedAt?: number): void;
+	resumeMessage(message: AssistantMessage, now?: number): void;
 	tick(now?: number): void;
 	dispose(): void;
 }
@@ -43,12 +44,13 @@ interface PatchRecord {
 	expanded: boolean;
 	enabled: boolean;
 	previewLines: number;
-	now: number;
 	originalUpdate: AssistantMessageComponent["updateContent"];
 	states: WeakMap<AssistantMessageComponent, ComponentState>;
 	components: Set<WeakRef<AssistantMessageComponent>>;
 	knownComponents: WeakSet<AssistantMessageComponent>;
 	timings: Map<number, ThinkingTiming>;
+	latestThinking: Map<number, string>;
+	primaries: Map<number, WeakRef<AssistantMessageComponent>>;
 	rerenderAll(): void;
 	rerenderTimestamp(timestamp: number): void;
 }
@@ -57,8 +59,30 @@ function hasThinking(message: AssistantMessage): boolean {
 	return message.content.some((block) => block.type === "thinking" && block.thinking.trim());
 }
 
+function isMarkedMessage(message: AssistantMessage): boolean {
+	return message.content.some(
+		(block) => block.type === "thinking" && block.thinking.startsWith(MARKER_PREFIX),
+	);
+}
+
 function displayMode(timing: ThinkingTiming | undefined): FoldMode {
 	return timing?.completedAt !== undefined ? "collapse" : "preview";
+}
+
+function primaryFor(
+	record: PatchRecord,
+	timestamp: number,
+	component: AssistantMessageComponent,
+): AssistantMessageComponent {
+	const existing = record.primaries.get(timestamp)?.deref();
+	if (existing) return existing;
+	record.primaries.set(timestamp, new WeakRef(component));
+	return component;
+}
+
+function restoreNativeHide(component: AssistantMessageComponent, state: ComponentState): void {
+	if (state.nativeHide === undefined) return;
+	(component as unknown as AssistantInternals).hideThinkingBlock = state.nativeHide;
 }
 
 function rebuild(
@@ -71,49 +95,61 @@ function rebuild(
 	if (!message) return;
 
 	const internals = component as unknown as AssistantInternals;
-	const nativeHidden = internals.hideThinkingBlock;
-	try {
-		if (!record.enabled || record.expanded || !hasThinking(message)) {
-			state.renderedMessage = message;
-			record.originalUpdate.call(component, message, opts);
-			return;
-		}
-
-		const marked = createMarkedThinkingMessage(message);
-		if (!marked) {
-			state.renderedMessage = message;
-			record.originalUpdate.call(component, message, opts);
-			return;
-		}
-
-		internals.hideThinkingBlock = false;
-		state.renderedMessage = marked.message as AssistantMessage;
-		record.originalUpdate.call(component, marked.message as AssistantMessage, opts);
-
-		const children = findContentChildren(component);
-		const timing = record.timings.get(message.timestamp);
-		const elapsed = (timing?.completedAt ?? record.now) - (timing?.startedAt ?? record.now);
-		const completed = timing?.completedAt !== undefined;
-		const replaced =
-			children !== undefined &&
-			replaceMarkedThinkingChildren({
-				children,
-				sections: marked.sections,
-				previewLines: record.previewLines,
-				mode: displayMode(timing),
-				labelFor: (canExpand) =>
-					completed
-						? createCompletedThinkingLabel(elapsed, canExpand)
-						: createStreamingThinkingLabel(elapsed, canExpand),
-			});
-
-		if (!replaced) {
-			state.renderedMessage = message;
-			record.originalUpdate.call(component, message, opts);
-		}
-	} finally {
-		internals.hideThinkingBlock = nativeHidden;
+	if (state.nativeHide === undefined) {
+		state.nativeHide = internals.hideThinkingBlock === true;
 	}
+
+	const thinkingText = record.latestThinking.get(message.timestamp) ?? latestThinkingText(message);
+	if (!record.enabled || record.expanded || !thinkingText) {
+		restoreNativeHide(component, state);
+		state.renderedMessage = message;
+		record.originalUpdate.call(component, message, opts);
+		return;
+	}
+
+	const primary = primaryFor(record, message.timestamp, component);
+	if (primary !== component) {
+		restoreNativeHide(component, state);
+		const stripped = stripThinkingBlocks(message);
+		state.renderedMessage = stripped as AssistantMessage;
+		record.originalUpdate.call(component, stripped as AssistantMessage, opts);
+		const primaryState = record.states.get(primary);
+		if (primaryState) rebuild(primary, primaryState, record);
+		return;
+	}
+
+	const marked = createMarkedThinkingMessage(message, { thinkingText });
+	if (!marked) {
+		restoreNativeHide(component, state);
+		state.renderedMessage = message;
+		record.originalUpdate.call(component, message, opts);
+		return;
+	}
+
+	// Stay off while the fold is live so OMP's shape key does not flip every token.
+	internals.hideThinkingBlock = false;
+	state.renderedMessage = marked.message as AssistantMessage;
+	record.originalUpdate.call(component, marked.message as AssistantMessage, opts);
+
+	const children = findContentChildren(component);
+	if (!children) return;
+
+	if (!record.timings.has(message.timestamp)) {
+		record.timings.set(message.timestamp, beginTiming(Date.now()));
+	}
+	const timing = record.timings.get(message.timestamp);
+	const elapsed = elapsedThinkingMs(timing, Date.now());
+	const completed = timing?.completedAt !== undefined;
+	replaceMarkedThinkingChildren({
+		children,
+		sections: marked.sections,
+		previewLines: record.previewLines,
+		mode: displayMode(timing),
+		labelFor: (canExpand) =>
+			completed
+				? createCompletedThinkingLabel(elapsed, canExpand)
+				: createStreamingThinkingLabel(elapsed, canExpand),
+	});
 }
 
 function forEachLive(
@@ -151,12 +187,13 @@ function createPatchRecord(previewLines: number): PatchRecord {
 		expanded: false,
 		enabled: true,
 		previewLines,
-		now: Date.now(),
 		originalUpdate,
 		states: new WeakMap(),
 		components: new Set(),
 		knownComponents: new WeakSet(),
 		timings: new Map(),
+		latestThinking: new Map(),
+		primaries: new Map(),
 		rerenderAll() {
 			forEachLive(this, (component, state) => rebuild(component, state, this));
 		},
@@ -167,9 +204,22 @@ function createPatchRecord(previewLines: number): PatchRecord {
 		},
 	};
 
-	prototype.updateContent = function (this: AssistantMessageComponent, message: AssistantMessage, opts?: { transient?: boolean }) {
+	prototype.updateContent = function (
+		this: AssistantMessageComponent,
+		message: AssistantMessage,
+		opts?: { transient?: boolean },
+	) {
 		const state = record.states.get(this) ?? {};
-		if (message !== state.renderedMessage) state.fullMessage = message;
+		if (message !== state.renderedMessage && !isMarkedMessage(message)) {
+			state.fullMessage = message;
+			if (hasThinking(message)) {
+				const text = latestThinkingText(message);
+				if (text) record.latestThinking.set(message.timestamp, text);
+				if (!record.timings.has(message.timestamp)) {
+					record.timings.set(message.timestamp, beginTiming(Date.now()));
+				}
+			}
+		}
 		record.states.set(this, state);
 		if (!record.knownComponents.has(this)) {
 			record.knownComponents.add(this);
@@ -225,21 +275,22 @@ export function installThinkingFoldPatch(previewLines: number): ThinkingFoldPatc
 			record.rerenderTimestamp(timestamp);
 		},
 		beginMessage(message, startedAt = Date.now()) {
-			record.timings.set(message.timestamp, { startedAt });
-			record.now = startedAt;
+			if (!record.timings.has(message.timestamp)) {
+				record.timings.set(message.timestamp, beginTiming(startedAt));
+			}
 			record.rerenderTimestamp(message.timestamp);
 		},
 		completeMessage(message, completedAt = Date.now()) {
-			const timing = record.timings.get(message.timestamp) ?? {
-				startedAt: Math.min(message.timestamp, completedAt),
-			};
-			if (timing.completedAt !== undefined) return;
-			record.timings.set(message.timestamp, { ...timing, completedAt });
-			record.now = completedAt;
+			const timing = record.timings.get(message.timestamp) ?? beginTiming(Math.min(message.timestamp, completedAt));
+			record.timings.set(message.timestamp, completeTiming(timing, completedAt));
 			record.rerenderTimestamp(message.timestamp);
 		},
-		tick(now = Date.now()) {
-			record.now = now;
+		resumeMessage(message, now = Date.now()) {
+			const timing = record.timings.get(message.timestamp) ?? beginTiming(now);
+			record.timings.set(message.timestamp, resumeTiming(timing, now));
+			record.rerenderTimestamp(message.timestamp);
+		},
+		tick(_now = Date.now()) {
 			forEachLive(record, (component, state) => {
 				const timestamp = state.fullMessage?.timestamp;
 				if (timestamp === undefined || record.timings.get(timestamp)?.completedAt !== undefined) return;
@@ -251,6 +302,7 @@ export function installThinkingFoldPatch(previewLines: number): ThinkingFoldPatc
 			disposed = true;
 			record.owners -= 1;
 			if (record.owners > 0 || getPatchRecord() !== record) return;
+			forEachLive(record, restoreNativeHide);
 			prototype.updateContent = record.originalUpdate;
 			setPatchRecord(undefined);
 		},

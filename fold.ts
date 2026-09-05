@@ -21,19 +21,34 @@ export interface FoldedThinkingSectionOptions {
 	labelFor: (canExpand: boolean) => string;
 	previewLines: number;
 	mode: FoldMode;
+	marker?: string;
 }
 
 export class FoldedThinkingSection implements Renderable {
-	readonly #content: Renderable;
-	readonly #labelFor: (canExpand: boolean) => string;
-	readonly #previewLines: number;
-	readonly #mode: FoldMode;
+	#content: Renderable;
+	#labelFor: (canExpand: boolean) => string;
+	#previewLines: number;
+	#mode: FoldMode;
+	readonly marker?: string;
 
 	constructor(options: FoldedThinkingSectionOptions) {
 		this.#content = options.content;
 		this.#labelFor = options.labelFor;
 		this.#previewLines = options.previewLines;
 		this.#mode = options.mode;
+		this.marker = options.marker;
+	}
+
+	update(options: Partial<Omit<FoldedThinkingSectionOptions, "marker">>): void {
+		if (options.content) this.#content = options.content;
+		if (options.labelFor) this.#labelFor = options.labelFor;
+		if (options.previewLines !== undefined) this.#previewLines = options.previewLines;
+		if (options.mode) this.#mode = options.mode;
+	}
+
+	setContentText(text: string): void {
+		const content = this.#content as DebugPreview;
+		content.setText?.(text);
 	}
 
 	render(width: number): string[] {
@@ -78,6 +93,20 @@ export function replaceMarkedThinkingChildren(options: {
 	for (let index = 0; index < options.children.length; index++) {
 		const child = options.children[index];
 		if (!child || typeof child !== "object") continue;
+
+		if (child instanceof FoldedThinkingSection && child.marker && pending.has(child.marker)) {
+			const section = pending.get(child.marker);
+			if (!section) continue;
+			child.setContentText(section.text);
+			child.update({
+				labelFor: options.labelFor,
+				previewLines: options.previewLines,
+				mode: options.mode,
+			});
+			pending.delete(section.marker);
+			continue;
+		}
+
 		const preview = readPreview(child);
 		if (typeof preview !== "string") continue;
 		const section = [...pending.values()].find((item) => previewMatchesMarker(preview, item.marker));
@@ -89,6 +118,7 @@ export function replaceMarkedThinkingChildren(options: {
 			labelFor: options.labelFor,
 			previewLines: options.previewLines,
 			mode: options.mode,
+			marker: section.marker,
 		});
 		pending.delete(section.marker);
 	}
@@ -116,7 +146,7 @@ export interface MarkedThinkingMessage {
 	sections: MarkedThinkingSection[];
 }
 
-export function createMarkedThinkingMessage(message: AssistantLikeMessage): MarkedThinkingMessage | undefined {
+function thinkingRuns(message: AssistantLikeMessage): { start: number; end: number; text: string }[] {
 	const runs: { start: number; end: number; text: string }[] = [];
 	let index = 0;
 	while (index < message.content.length) {
@@ -136,22 +166,47 @@ export function createMarkedThinkingMessage(message: AssistantLikeMessage): Mark
 		}
 		runs.push({ start, end: index, text: fragments.join("\n\n") });
 	}
-	if (runs.length === 0) return undefined;
+	return runs;
+}
+
+export function latestThinkingText(message: AssistantLikeMessage): string {
+	const runs = thinkingRuns(message);
+	for (let index = runs.length - 1; index >= 0; index--) {
+		const text = runs[index]?.text;
+		if (text) return text;
+	}
+	return "";
+}
+
+export function stripThinkingBlocks<T extends AssistantLikeMessage>(message: T): T {
+	return {
+		...message,
+		content: message.content.map((block) => (block.type === "thinking" ? { ...block, thinking: "" } : { ...block })),
+	};
+}
+
+export function createMarkedThinkingMessage(
+	message: AssistantLikeMessage,
+	options?: { thinkingText?: string },
+): MarkedThinkingMessage | undefined {
+	const text = options?.thinkingText ?? latestThinkingText(message);
+	if (!text) return undefined;
 
 	const content = message.content.map((block) => ({ ...block }));
-	const sections: MarkedThinkingSection[] = [];
-	runs.forEach((run, runIndex) => {
-		for (let i = run.start; i < run.end; i++) {
-			const block = content[i];
-			if (block?.type === "thinking") content[i] = { ...block, thinking: "" };
-		}
-		const first = content[run.start];
-		if (!first || first.type !== "thinking") return;
-		if (runIndex > 0 && !run.text) return;
-		const marker = createThinkingMarker(message.timestamp, runIndex);
-		content[run.start] = { ...first, thinking: marker };
-		sections.push({ marker, text: run.text, showLabel: runIndex === 0 });
-	});
-	if (sections.length === 0) return undefined;
-	return { message: { ...message, content }, sections };
+	const firstThinking = content.findIndex((block) => block.type === "thinking");
+	if (firstThinking < 0) return undefined;
+
+	for (let index = 0; index < content.length; index++) {
+		const block = content[index];
+		if (block?.type === "thinking") content[index] = { ...block, thinking: "" };
+	}
+
+	const first = content[firstThinking];
+	if (!first || first.type !== "thinking") return undefined;
+	const marker = createThinkingMarker(message.timestamp, 0);
+	content[firstThinking] = { ...first, thinking: marker };
+	return {
+		message: { ...message, content },
+		sections: [{ marker, text, showLabel: true }],
+	};
 }

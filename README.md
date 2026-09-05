@@ -2,7 +2,7 @@
 
 Fold long assistant thinking blocks in [Oh My Pi](https://github.com/can1357/oh-my-pi) (OMP) so the terminal stays readable.
 
-While a model is reasoning you see a short live tail and a timer. When it starts answering or calling a tool, that collapses to a leftover line. Press **Alt+T** to expand the full trace.
+While a model is reasoning you see a short live tail and a timer. When it starts answering or calling a tool, that collapses to a leftover line. Later thinking in the same turn replaces that one block — tool cards stay stacked under it. Press **Alt+T** to expand the full trace.
 
 ```text
 Thinking 7s (alt+t to expand)
@@ -52,9 +52,10 @@ Settings persist in `~/.omp/agent/thinking-fold.json`.
 
 OMP's thinking renderer hook is append-only, so this extension patches `AssistantMessageComponent.updateContent` at runtime:
 
-1. Let OMP build its native thinking Markdown.
+1. Let OMP build its native thinking Markdown on the first assistant component of the turn.
 2. Identify those children via a short display marker and `Markdown.debugState()`.
 3. Wrap `render(width)` so only the last N terminal rows (or the leftover label) are shown.
+4. Hide thinking on post-tool assistant segments OMP creates after each tool, and replace the first block's tail instead.
 
 If the public component API is missing, the extension disables itself and leaves native rendering alone. The patch is reference-counted and restored on session shutdown.
 

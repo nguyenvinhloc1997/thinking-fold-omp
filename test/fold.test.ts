@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
 	FoldedThinkingSection,
+	createMarkedThinkingMessage,
 	createThinkingMarker,
 	findContentChildren,
 	foldRenderedLines,
+	latestThinkingText,
 	previewMatchesMarker,
 	replaceMarkedThinkingChildren,
+	stripThinkingBlocks,
 } from "../fold.ts";
 
 describe("foldRenderedLines", () => {
@@ -67,6 +70,57 @@ describe("FoldedThinkingSection", () => {
 	});
 });
 
+describe("latestThinkingText", () => {
+	test("keeps only the last thinking run so a later burst replaces the first", () => {
+		expect(
+			latestThinkingText({
+				timestamp: 1,
+				content: [
+					{ type: "thinking", thinking: "first look" },
+					{ type: "toolCall" },
+					{ type: "thinking", thinking: "after the tool" },
+				],
+			}),
+		).toBe("after the tool");
+	});
+});
+
+describe("stripThinkingBlocks", () => {
+	test("blanks thinking so a post-tool segment does not spawn another fold", () => {
+		const stripped = stripThinkingBlocks({
+			timestamp: 1,
+			content: [
+				{ type: "thinking", thinking: "later thoughts" },
+				{ type: "text", text: "answer" },
+			],
+		});
+		expect(stripped.content).toEqual([
+			{ type: "thinking", thinking: "" },
+			{ type: "text", text: "answer" },
+		]);
+	});
+});
+
+describe("createMarkedThinkingMessage", () => {
+	test("emits one fold section whose text is the latest thinking", () => {
+		const marked = createMarkedThinkingMessage(
+			{
+				timestamp: 1,
+				content: [
+					{ type: "thinking", thinking: "old" },
+					{ type: "thinking", thinking: "older" },
+					{ type: "text", text: "hi" },
+					{ type: "thinking", thinking: "newest" },
+				],
+			},
+			{ thinkingText: "newest" },
+		);
+		expect(marked?.sections).toHaveLength(1);
+		expect(marked?.sections[0]?.text).toBe("newest");
+		expect(marked?.message.content.filter((block) => block.type === "thinking" && block.thinking)).toHaveLength(1);
+	});
+});
+
 describe("replaceMarkedThinkingChildren", () => {
 	test("replaces a marked markdown child and restores the full thinking text", () => {
 		const marker = createThinkingMarker(1, 0);
@@ -93,6 +147,38 @@ describe("replaceMarkedThinkingChildren", () => {
 		expect((children[1] as FoldedThinkingSection).render(80)).toEqual([
 			"Thought for 1.0s (alt+t to expand)",
 		]);
+	});
+
+	test("updates an existing fold in place instead of requiring a new marker child", () => {
+		const marker = createThinkingMarker(1, 0);
+		const thinking = {
+			debugState: () => ({ textPreview: "already restored" }),
+			setText: (text: string) => {
+				thinking.text = text;
+				return true;
+			},
+			text: "old thinking",
+			render: () => ["old thinking"],
+		};
+		const fold = new FoldedThinkingSection({
+			content: thinking,
+			labelFor: () => "Thinking 0s",
+			previewLines: 1,
+			mode: "preview",
+			marker,
+		});
+		const children: unknown[] = [fold];
+		const replaced = replaceMarkedThinkingChildren({
+			children,
+			sections: [{ marker, text: "new thinking", showLabel: true }],
+			labelFor: () => "Thinking 3s (alt+t to expand)",
+			previewLines: 1,
+			mode: "collapse",
+		});
+		expect(replaced).toBe(true);
+		expect(children[0]).toBe(fold);
+		expect(thinking.text).toBe("new thinking");
+		expect(fold.render(80)).toEqual(["Thinking 3s (alt+t to expand)"]);
 	});
 
 	test("returns false when a marker is missing so the caller can fall back", () => {

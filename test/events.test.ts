@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { endsThinkingPhase } from "../events.ts";
+import { endsThinkingPhase, resumesThinkingPhase } from "../events.ts";
 
 describe("endsThinkingPhase", () => {
 	test("freezes when the model starts answering or calling a tool", () => {
@@ -14,5 +14,13 @@ describe("endsThinkingPhase", () => {
 		expect(endsThinkingPhase("thinking_start")).toBe(false);
 		expect(endsThinkingPhase("thinking_delta")).toBe(false);
 		expect(endsThinkingPhase("start")).toBe(false);
+	});
+});
+
+describe("resumesThinkingPhase", () => {
+	test("reopens the fold when a later thinking burst starts after a tool", () => {
+		expect(resumesThinkingPhase("thinking_start")).toBe(true);
+		expect(resumesThinkingPhase("thinking_delta")).toBe(false);
+		expect(resumesThinkingPhase("thinking_end")).toBe(false);
 	});
 });
